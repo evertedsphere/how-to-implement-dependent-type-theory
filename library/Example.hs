@@ -1,15 +1,15 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 -- | An example module.
 module Example (main) where
 
-import Prelude hiding (lookup)
-import Data.Maybe
-import Data.Map hiding (map)
+import           Data.Map             hiding (map)
+import           Data.Maybe
+import           Prelude              hiding (exp, lookup, pi)
 
-import Control.Monad.State
-import Control.Monad.Except
-import Control.Monad.Reader
+import           Control.Monad.Except
+import           Control.Monad.Reader
+import           Control.Monad.State
 
 -- | An example function.
 main :: IO ()
@@ -22,16 +22,16 @@ data Var
   deriving (Show, Eq, Ord)
 
 data Abs = Abs
-  { var :: Var
-  , ty :: Exp
-  , expr :: Exp
+  { variable :: Var
+  , ty       :: Exp
+  , expr     :: Exp
   } deriving (Show, Eq)
 
 data Exp
-  = Variable Var
+  = Var Var
   | Universe Int
   | Pi Abs
-  | Lambda Abs
+  | Lam Abs
   | App Exp Exp
   deriving (Show, Eq)
 
@@ -53,16 +53,16 @@ subst' :: Monad m => Map Var Exp -> Abs -> TcM m Abs
 subst' ctx (Abs x ty env) = do
   x' <- fresh x
   ty' <- subst ctx ty
-  env' <- subst (insert x (Variable x') ctx) env
+  env' <- subst (insert x (Var x') ctx) env
   pure $ Abs x' ty' env'
 
 subst :: Monad m => Map Var Exp -> Exp -> TcM m Exp
 subst ctx =
   \case
     Pi abs -> Pi <$> subst' ctx abs
-    Lambda abs -> Lambda <$> subst' ctx abs
+    Lam abs -> Lam <$> subst' ctx abs
     App f v -> App <$> subst ctx f <*> subst ctx v
-    v@(Variable x) -> pure $ findWithDefault v x ctx
+    v@(Var x) -> pure $ findWithDefault v x ctx
     u@(Universe _) -> pure u
 
 substInto :: Monad m => Var -> Exp -> Exp -> TcM m Exp
@@ -95,13 +95,13 @@ extendCtx' x ty = insert x (ty, Nothing)
 inferType :: Monad m => Exp -> TcM m Exp
 inferType =
   \case
-    Variable x -> lookupType x
+    Var x -> lookupType x
     Universe u -> pure $ Universe (u + 1)
     Pi (Abs x ty exp) -> do
       ty' <- inferUniverse ty
       exp' <- local (extendCtx' x ty) (inferUniverse exp)
       pure (Universe (max ty' exp'))
-    Lambda (Abs x ty exp) -> do
+    Lam (Abs x ty exp) -> do
       ty' <- inferUniverse ty
       exp' <- local (extendCtx' x ty) (inferType exp)
       pure (Pi (Abs x ty exp'))
@@ -117,7 +117,7 @@ inferUniverse exp = do
   norm <- normalize ty
   case norm of
     Universe k -> pure k
-    _ -> throwError []
+    _          -> throwError [pretty exp ++ " is not a universe"]
 
 inferPi :: Monad m => Exp -> TcM m Abs
 inferPi exp = do
@@ -125,27 +125,27 @@ inferPi exp = do
   norm <- normalize ty
   case norm of
     Pi k -> pure k
-    _ -> throwError []
+    _    -> throwError [pretty exp ++ " is not a pi-abstraction"]
 
 normalize :: Monad m => Exp -> TcM m Exp
 normalize =
   \case
-    v@(Variable x) -> do
+    v@(Var x) -> do
       val <- lookupValue x
       case val of
-        Nothing -> pure v
+        Nothing  -> pure v
         Just exp -> normalize exp
     App f v -> do
       nv <- normalize v
       nf <- normalize f
       case nf of
-        Lambda (Abs x _ f') -> do
+        Lam (Abs x ty f') -> do
           nf' <- substInto x v f'
           normalize nf'
         f' -> pure $ App f' nv
     u@(Universe _) -> pure u
     Pi a -> Pi <$> normalizeAbs a
-    Lambda a -> Lambda <$> normalizeAbs a
+    Lam a -> Lam <$> normalizeAbs a
 
 normalizeAbs :: Monad m => Abs -> TcM m Abs
 normalizeAbs (Abs x ty exp) = do
@@ -156,7 +156,7 @@ normalizeAbs (Abs x ty exp) = do
 checkEq :: Monad m => Exp -> Exp -> TcM m ()
 checkEq s ty = do
   isEq <- equalInCtx s ty
-  unless isEq $ throwError ["adf"]
+  unless isEq $ throwError [pretty s ++ " ≠ " ++ pretty ty ++ " in the current context"]
 
 equalInCtx :: Monad m => Exp -> Exp -> TcM m Bool
 equalInCtx a b = do
@@ -165,15 +165,15 @@ equalInCtx a b = do
   equalInCtx' a' b'
 
   where
-    equalInCtx' (Variable v) (Variable v') = pure $ v == v'
+    equalInCtx' (Var v) (Var v')           = pure $ v == v'
     equalInCtx' (Universe k) (Universe k') = pure $ k == k'
-    equalInCtx' (App f v) (App f' v') = pure $ (f == f') && (v == v')
-    equalInCtx' (Pi p) (Pi p') = equalAbs p p'
-    equalInCtx' (Lambda p) (Lambda p') = equalAbs p p'
-    equalInCtx' _ _ = pure False
+    equalInCtx' (App f v) (App f' v')      = pure $ (f == f') && (v == v')
+    equalInCtx' (Pi p) (Pi p')             = equalAbs p p'
+    equalInCtx' (Lam p) (Lam p')           = equalAbs p p'
+    equalInCtx' _ _                        = pure False
 
     equalAbs (Abs x ty exp) (Abs x' ty' exp') = do
-      exp'' <- substInto x' (Variable x) exp'
+      exp'' <- substInto x' (Var x) exp'
       pure $ (ty == ty') && (exp' == exp'')
 
 initialEnv :: Env
@@ -182,20 +182,23 @@ initialEnv = Env {sym = 0}
 initialCtx :: Ctx
 initialCtx =
   fromList . map (\(a, b) -> (a, (b, Nothing))) $
-    [ (x, a)
-    , (ident, Lambda (Abs x a (Variable x)))
-    , (Str "a", Universe 0)
+    [ (Str "b", Universe 0)
+    , (x, b)
     ]
 
   where
     x = Str "x"
     ident = Str "id"
 
-    a = Variable $ Str "a"
-    b = App a a
+    a = Var $ Str "a"
+    b = Var $ Str "b"
 
-typecheck :: Monad m => TcM m a -> m (Either [String] a)
-typecheck = flip runReaderT initialCtx . flip evalStateT initialEnv . runExceptT
+typecheck :: MonadIO m => TcM m a -> m ()
+typecheck prog = do
+  result <- flip runReaderT initialCtx . flip evalStateT initialEnv . runExceptT $ prog
+  liftIO $ case result of
+    Left err -> mapM_ (putStrLn . ("Error: " ++)) err
+    Right _  -> putStrLn "Finished without errors."
 
 ppType :: MonadIO m => Var -> TcM m ()
 ppType x = do
@@ -207,23 +210,88 @@ ppType' x = do
   x' <- pure (Str x)
   ppType x'
 
-demo :: IO (Either [String] ())
+ppExp :: MonadIO m => Exp -> TcM m ()
+ppExp x = do
+  let px = pretty x
+  liftIO . putStrLn $ px
+  x' <- normalize x
+  when (x /= x') . liftIO . putStrLn $ "  = " ++ pretty x'
+
+  ty <- inferType x
+  liftIO . putStr $ "  : " ++ pretty ty
+
+  norm <- normalize ty
+  liftIO .
+    putStrLn $
+      (if ty == norm
+         then ""
+         else "  ~ " ++ pretty norm) ++ "\n"
+
+
+var = Str
+ref = Var
+apply = App
+lambda x t f = Lam (Abs x t (f (ref x)))
+typ x = lambda x . Universe
+pi x t e = Pi (Abs x t e)
+
+demo :: IO ()
 demo =
   typecheck $ do
     let x = Str "x"
-        w = App (Variable x) (Variable x)
-    ppType' "a"
-    ppType' "x"
-    ppType' "y"
+        a = Str "a"
+        b = Str "b"
+        v = Str "v"
+        w = Str "w"
+        z = Str "z"
+        t = Str "t"
+        r = Str "r"
+    ppExp (pi x (Universe 0) (ref x))
 
-prettyVar (Str s) = s
-prettyVar (Gensym s i) = s ++ "_" ++ show i
-prettyVar Dummy = "dummy"
+    let ident = typ a 0 $ \a -> lambda t a $ \t -> t
+
+    identapp <- normalize (apply ident (ref b))
+
+    let identapp' = apply identapp (ref x)
+
+    ppExp ident
+    ppExp identapp
+    ppExp identapp'
+
+    ppExp (Universe 0)
+    ppExp (Universe 10)
+
+prettyVar (Str s)      = s
+prettyVar (Gensym s i) = s ++ show i
+prettyVar Dummy        = "dummy"
+
+pair (Abs v t e) = "(" ++ prettyVar v ++ " : " ++ pretty t ++ ")"
+pair' (v, t) = "(" ++ prettyVar v ++ " : " ++ pretty t ++ ")"
 
 pretty :: Exp -> String
-pretty (Variable v) = prettyVar v
-pretty (Universe k) = "Set " ++ show k
-pretty (Lambda (Abs v t e)) =
-  "\\(" ++ prettyVar v ++ " : " ++ pretty t ++ ") -> " ++ pretty e
+pretty (Var v) = prettyVar v
+pretty (Universe 0) = "Type"
+pretty (Universe k) = "Type " ++ show k
 
-pretty (App e e') = "(" ++ pretty e ++ " " ++ pretty e' ++ ")"
+pretty lam@(Lam _) =
+  let (as, e) = collectAbstractions lam
+  in "λ " ++ unwords (map pair' as) ++ ". " ++ wrapIfNeeded e
+
+pretty pi@(Pi _) =
+  let (as, e) = collectAbstractions pi
+  in "Π " ++ unwords (map pair' as) ++ ". " ++ wrapIfNeeded e
+
+pretty (App e e') = "(" ++ pretty e ++ ") " ++ wrapIfNeeded e'
+
+wrapIfNeeded (Var v) = prettyVar v
+wrapIfNeeded e       = "(" ++ pretty e ++ ")"
+
+collectAbstractions (Lam (Abs v t lam@(Lam _))) = ((v,t) : x, y)
+  where (x,y) = collectAbstractions lam
+collectAbstractions (Lam (Abs v t e)) = ([(v,t)], e)
+
+collectAbstractions (Pi (Abs v t lam@(Pi _))) = ((v,t) : x, y)
+  where (x,y) = collectAbstractions lam
+collectAbstractions (Pi (Abs v t e)) = ([(v,t)], e)
+
+collectAbstractions e = ([], e)
