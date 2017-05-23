@@ -9,6 +9,7 @@ import Data.Map
 
 import Control.Monad.State
 import Control.Monad.Except
+import Control.Monad.Reader
 
 -- | An example function.
 main :: IO ()
@@ -38,7 +39,7 @@ data Exp
 
 data Env = Env { sym :: Int }
 
-type TcM m = ExceptT [String] (StateT Env m)
+type TcM m = ExceptT [String] (StateT Env (ReaderT Ctx m))
 
 fresh :: Monad m => Var -> TcM m Var
 fresh Dummy = pure Dummy
@@ -64,22 +65,25 @@ subst ctx =
     v@(Variable x) -> pure $ findWithDefault v x ctx
     u@(Universe _) -> pure u
 
+substInto :: Monad m => Var -> Exp -> Exp -> TcM m Exp
+substInto v e = subst (singleton v e)
+
 type Ctx = Map Var (Exp, Maybe Exp)
 
 lookupType
   :: Monad m
-  => Var -> Ctx -> TcM m Exp
-lookupType x ctx = do
-  let res = fst <$> lookup x ctx
+  => Var -> TcM m Exp
+lookupType x = do
+  res <- asks (fmap fst . lookup x)
   case res of
     Just ty -> pure ty
     Nothing -> throwError ["The context contains no binding named " ++ show x]
 
 lookupValue
   :: Monad m
-  => Var -> Ctx -> TcM m (Maybe Exp)
-lookupValue x ctx = do
-  let res = snd <$> lookup x ctx
+  => Var -> TcM m (Maybe Exp)
+lookupValue x = do
+  res <- asks (fmap snd . lookup x)
   case res of
     Just val -> pure val
     Nothing -> throwError [show x ++ " has not been bound to any value."]
@@ -87,75 +91,81 @@ lookupValue x ctx = do
 extendCtx :: Var -> Exp -> Maybe Exp -> Ctx -> Ctx
 extendCtx x ty val = insert x (ty, val)
 
-inferType ctx =
+extendCtx' :: Var -> Exp -> Ctx -> Ctx
+extendCtx' x ty = insert x (ty, Nothing)
+
+inferType
+  :: Monad m
+  => Exp -> TcM m Exp
+inferType =
   \case
-    Variable x -> lookupType x ctx
+    Variable x -> lookupType x
     Universe u -> pure $ Universe (u + 1)
     Pi (Abs x ty exp) -> do
-      kty <- inferUniverse ctx ty
-      kexp <- inferUniverse (extendCtx x ty Nothing ctx) exp
-      pure (Universe (max kty kexp))
-    Lambda abs@(Abs x ty exp) -> do
-      ty' <- inferUniverse ctx ty
-      exp' <- inferType (extendCtx x ty Nothing ctx) exp
-      pure (Pi (abs {expr = exp'}))
+      ty' <- inferUniverse ty
+      exp' <- local (extendCtx' x ty) (inferUniverse exp)
+      pure (Universe (max ty' exp'))
+    Lambda (Abs x ty exp) -> do
+      ty' <- inferUniverse ty
+      exp' <- local (extendCtx' x ty) (inferType exp)
+      pure (Pi (Abs x ty exp'))
     App f v -> do
-      (Abs x s ty) <- inferPi ctx f
-      ty' <- inferType ctx v
-      checkEq ctx s ty'
-      subst (singleton x ty') ty
+      (Abs x s ty) <- inferPi f
+      ty' <- inferType v
+      checkEq s ty'
+      substInto x ty' ty
 
-inferUniverse :: Monad m => Ctx -> Exp -> TcM m Int
-inferUniverse ctx exp = do
-  ty <- inferType ctx exp
-  norm <- normalize ctx ty
+inferUniverse :: Monad m => Exp -> TcM m Int
+inferUniverse exp = do
+  ty <- inferType exp
+  norm <- normalize ty
   case norm of
     Universe k -> pure k
     _ -> throwError []
 
-inferPi :: Monad m => Ctx -> Exp -> TcM m Abs
-inferPi ctx exp = do
-  ty <- inferType ctx exp
-  norm <- normalize ctx ty
+inferPi :: Monad m => Exp -> TcM m Abs
+inferPi exp = do
+  ty <- inferType exp
+  norm <- normalize ty
   case norm of
     Pi k -> pure k
     _ -> throwError []
 
-normalize :: Monad m => Ctx -> Exp -> TcM m Exp
-normalize ctx =
+normalize :: Monad m => Exp -> TcM m Exp
+normalize =
   \case
     v@(Variable x) -> do
-      val <- lookupValue x ctx
+      val <- lookupValue x
       case val of
         Nothing -> pure v
-        Just exp -> normalize ctx exp
+        Just exp -> normalize exp
     App f v -> do
-      nv <- normalize ctx v
-      nf <- normalize ctx f
+      nv <- normalize v
+      nf <- normalize f
       case nf of
         Lambda (Abs x _ f') -> do
-          nf' <- subst (singleton x v) f'
-          normalize ctx nf'
+          nf' <- substInto x v f'
+          normalize nf'
         f' -> pure $ App f' nv
     u@(Universe _) -> pure u
-    Pi a -> Pi <$> normalizeAbs ctx a
-    Lambda a -> Lambda <$> normalizeAbs ctx a
+    Pi a -> Pi <$> normalizeAbs a
+    Lambda a -> Lambda <$> normalizeAbs a
 
-normalizeAbs :: Monad m => Ctx -> Abs -> TcM m Abs
-normalizeAbs ctx (Abs x ty exp) = do
-  ty' <- normalize ctx ty
-  exp' <- normalize (extendCtx x ty' Nothing ctx) exp
+normalizeAbs :: Monad m => Abs -> TcM m Abs
+normalizeAbs (Abs x ty exp) = do
+  ty' <- normalize ty
+  exp' <- local (extendCtx x ty' Nothing) $ normalize exp
   pure (Abs x ty' exp')
 
-checkEq :: Monad m => Ctx -> Exp -> Exp -> TcM m ()
-checkEq ctx s ty = do
-  isEq <- equalInCtx ctx s ty
+checkEq :: Monad m => Exp -> Exp -> TcM m ()
+checkEq s ty = do
+  isEq <- equalInCtx s ty
   unless isEq $ throwError ["adf"]
 
-equalInCtx :: Monad m => Ctx -> Exp -> Exp -> TcM m Bool
-equalInCtx ctx a b = do
-  a' <- normalize ctx a
-  b' <- normalize ctx b
+equalInCtx :: Monad m => Exp -> Exp -> TcM m Bool
+equalInCtx a b = do
+  a' <- normalize a
+  b' <- normalize b
   equalInCtx' a' b'
 
   where
@@ -166,14 +176,17 @@ equalInCtx ctx a b = do
     equalInCtx' (Lambda p) (Lambda p') = equalAbs p p'
 
     equalAbs (Abs x ty exp) (Abs x' ty' exp') = do
-      exp'' <- subst (singleton x' (Variable x)) exp'
+      exp'' <- substInto x' (Variable x) exp'
       pure $ (ty == ty') && (exp' == exp'')
 
 initialEnv :: Env
 initialEnv = Env {sym = 0}
 
+initialCtx :: Ctx
+initialCtx = empty
+
 typecheck :: Monad m => TcM m a -> m (Either [String] a)
-typecheck = flip evalStateT initialEnv . runExceptT
+typecheck = flip runReaderT initialCtx . flip evalStateT initialEnv . runExceptT
 
 demo :: IO (Either [String] ())
 demo =
