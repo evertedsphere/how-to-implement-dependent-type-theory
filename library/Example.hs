@@ -5,7 +5,7 @@ module Example (main) where
 
 import Prelude hiding (lookup)
 import Data.Maybe
-import Data.Map
+import Data.Map hiding (map)
 
 import Control.Monad.State
 import Control.Monad.Except
@@ -17,8 +17,7 @@ main = return ()
 
 data Var
   = Str String
-  | Gensym String
-           Int
+  | Gensym String Int
   | Dummy
   deriving (Show, Eq, Ord)
 
@@ -33,11 +32,12 @@ data Exp
   | Universe Int
   | Pi Abs
   | Lambda Abs
-  | App Exp
-        Exp
+  | App Exp Exp
   deriving (Show, Eq)
 
 data Env = Env { sym :: Int }
+
+type Ctx = Map Var (Exp, Maybe Exp)
 
 type TcM m = ExceptT [String] (StateT Env (ReaderT Ctx m))
 
@@ -68,8 +68,6 @@ subst ctx =
 substInto :: Monad m => Var -> Exp -> Exp -> TcM m Exp
 substInto v e = subst (singleton v e)
 
-type Ctx = Map Var (Exp, Maybe Exp)
-
 lookupType
   :: Monad m
   => Var -> TcM m Exp
@@ -77,7 +75,7 @@ lookupType x = do
   res <- asks (fmap fst . lookup x)
   case res of
     Just ty -> pure ty
-    Nothing -> throwError ["The context contains no binding named " ++ show x]
+    Nothing -> throwError ["The context contains no binding named " ++ prettyVar x]
 
 lookupValue
   :: Monad m
@@ -86,7 +84,7 @@ lookupValue x = do
   res <- asks (fmap snd . lookup x)
   case res of
     Just val -> pure val
-    Nothing -> throwError [show x ++ " has not been bound to any value."]
+    Nothing -> throwError [prettyVar x ++ " has not been bound to any value."]
 
 extendCtx :: Var -> Exp -> Maybe Exp -> Ctx -> Ctx
 extendCtx x ty val = insert x (ty, val)
@@ -94,9 +92,7 @@ extendCtx x ty val = insert x (ty, val)
 extendCtx' :: Var -> Exp -> Ctx -> Ctx
 extendCtx' x ty = insert x (ty, Nothing)
 
-inferType
-  :: Monad m
-  => Exp -> TcM m Exp
+inferType :: Monad m => Exp -> TcM m Exp
 inferType =
   \case
     Variable x -> lookupType x
@@ -174,6 +170,7 @@ equalInCtx a b = do
     equalInCtx' (App f v) (App f' v') = pure $ (f == f') && (v == v')
     equalInCtx' (Pi p) (Pi p') = equalAbs p p'
     equalInCtx' (Lambda p) (Lambda p') = equalAbs p p'
+    equalInCtx' _ _ = pure False
 
     equalAbs (Abs x ty exp) (Abs x' ty' exp') = do
       exp'' <- substInto x' (Variable x) exp'
@@ -183,16 +180,50 @@ initialEnv :: Env
 initialEnv = Env {sym = 0}
 
 initialCtx :: Ctx
-initialCtx = empty
+initialCtx =
+  fromList . map (\(a, b) -> (a, (b, Nothing))) $
+    [ (x, a)
+    , (ident, Lambda (Abs x a (Variable x)))
+    , (Str "a", Universe 0)
+    ]
+
+  where
+    x = Str "x"
+    ident = Str "id"
+
+    a = Variable $ Str "a"
+    b = App a a
 
 typecheck :: Monad m => TcM m a -> m (Either [String] a)
 typecheck = flip runReaderT initialCtx . flip evalStateT initialEnv . runExceptT
 
+ppType :: MonadIO m => Var -> TcM m ()
+ppType x = do
+  let px = prettyVar x
+  ty <- lookupType x
+  liftIO . putStrLn $ px ++ " : " ++ pretty ty
+
+ppType' x = do
+  x' <- pure (Str x)
+  ppType x'
+
 demo :: IO (Either [String] ())
 demo =
   typecheck $ do
-    let v = Str "asdf"
-    x <- fresh v
-    liftIO $ print x
-    x <- fresh v
-    liftIO $ print x
+    let x = Str "x"
+        w = App (Variable x) (Variable x)
+    ppType' "a"
+    ppType' "x"
+    ppType' "y"
+
+prettyVar (Str s) = s
+prettyVar (Gensym s i) = s ++ "_" ++ show i
+prettyVar Dummy = "dummy"
+
+pretty :: Exp -> String
+pretty (Variable v) = prettyVar v
+pretty (Universe k) = "Set " ++ show k
+pretty (Lambda (Abs v t e)) =
+  "\\(" ++ prettyVar v ++ " : " ++ pretty t ++ ") -> " ++ pretty e
+
+pretty (App e e') = "(" ++ pretty e ++ " " ++ pretty e' ++ ")"
