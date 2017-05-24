@@ -49,6 +49,9 @@ fresh (Str x) = do
   modify (\e -> e { sym = ctr + 1})
   pure (Gensym x ctr)
 
+fresh' :: Monad m => String -> TcM m Var
+fresh' = fresh . Str
+
 subst' :: Monad m => Map Var Exp -> Abs -> TcM m Abs
 subst' ctx (Abs x ty env) = do
   x' <- fresh x
@@ -181,15 +184,26 @@ initialEnv = Env {sym = 0}
 
 initialCtx :: Ctx
 initialCtx =
-  fromList . map (\(a, b) -> (a, (b, Nothing))) $
-    [ (Str "b", Universe 0)
-    , (x, b)
-    ]
-
+  fromList $
+  [(Str "plus", (plusty, Just plus))] ++
+  (map (\(a, b) -> (a, (b, Nothing))) $
+   [ (Str "b", Universe 0)
+   , (x, b)
+   , (nat, Universe 0)
+   , (zero, nat')
+   , (succ, pi q nat' nat')
+   ])
   where
+    plus = lambda (Str "m") nat' $ \m -> lambda (Str "n") nat' $ \n -> m
+    plusty = pi (Str "mt") nat' $ let m = (ref (Str "mt")) in pi (Str "nt") nat' $ m
+
+    q = Str "q"
+    nat = Str "Nat"
+    nat' = ref nat
+    zero = Str "Zero"
+    succ = Str "Succ"
     x = Str "x"
     ident = Str "id"
-
     a = Var $ Str "a"
     b = Var $ Str "b"
 
@@ -214,8 +228,10 @@ ppExp :: MonadIO m => Exp -> TcM m ()
 ppExp x = do
   let px = pretty x
   liftIO . putStrLn $ px
+
   x' <- normalize x
-  when (x /= x') . liftIO . putStrLn $ "  = " ++ pretty x'
+  when (x /= x') $
+    liftIO . putStrLn $ "  = " ++ pretty x'
 
   ty <- inferType x
   liftIO . putStr $ "  : " ++ pretty ty
@@ -246,18 +262,35 @@ demo =
         z = Str "z"
         t = Str "t"
         r = Str "r"
+        p = Str "p"
+        q = Str "q"
+        zero = Str "Zero"
+        succ = Str "Succ"
+        plus = Str "plus"
+        nat = Var $ Str "Nat"
     ppExp (pi x (Universe 0) (ref x))
-
     let ident = typ a 0 $ \a -> lambda t a $ \t -> t
-
-    identapp <- normalize (apply ident (ref b))
-
+    let identapp = apply ident (ref b)
+    identapp <- normalize identapp
     let identapp' = apply identapp (ref x)
-
+    let true =
+          typ p 0 $ \p ->
+            typ q 0 $ \q ->
+              lambda (Str "m") p $ \m -> lambda (Str "n") q $ \n -> m
+    let false =
+          typ p 0 $ \p ->
+            typ q 0 $ \q ->
+              lambda (Str "m") p $ \m -> lambda (Str "n") q $ \n -> n
     ppExp ident
     ppExp identapp
     ppExp identapp'
-
+    ppExp (ref plus)
+    ppExp true
+    ppExp false
+    ppExp (apply (ref plus) (ref zero))
+    ppExp (ref zero)
+    ppExp (apply (ref succ) (ref zero))
+    ppExp (apply (ref succ) (apply (ref succ) (ref zero)))
     ppExp (Universe 0)
     ppExp (Universe 10)
 
@@ -270,7 +303,6 @@ pair' (v, t) = "(" ++ prettyVar v ++ " : " ++ pretty t ++ ")"
 
 pretty :: Exp -> String
 pretty (Var v) = prettyVar v
-pretty (Universe 0) = "Type"
 pretty (Universe k) = "Type " ++ show k
 
 pretty lam@(Lam _) =
@@ -281,7 +313,7 @@ pretty pi@(Pi _) =
   let (as, e) = collectAbstractions pi
   in "Π " ++ unwords (map pair' as) ++ ". " ++ wrapIfNeeded e
 
-pretty (App e e') = "(" ++ pretty e ++ ") " ++ wrapIfNeeded e'
+pretty (App e e') = wrapIfNeeded e ++ " " ++ wrapIfNeeded e'
 
 wrapIfNeeded (Var v) = prettyVar v
 wrapIfNeeded e       = "(" ++ pretty e ++ ")"
@@ -290,8 +322,8 @@ collectAbstractions (Lam (Abs v t lam@(Lam _))) = ((v,t) : x, y)
   where (x,y) = collectAbstractions lam
 collectAbstractions (Lam (Abs v t e)) = ([(v,t)], e)
 
-collectAbstractions (Pi (Abs v t lam@(Pi _))) = ((v,t) : x, y)
-  where (x,y) = collectAbstractions lam
+collectAbstractions (Pi (Abs v t pi@(Pi _))) = ((v,t) : x, y)
+  where (x,y) = collectAbstractions pi
 collectAbstractions (Pi (Abs v t e)) = ([(v,t)], e)
 
 collectAbstractions e = ([], e)
