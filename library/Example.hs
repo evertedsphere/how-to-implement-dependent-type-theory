@@ -112,7 +112,7 @@ inferType =
       (Abs x s ty) <- inferPi f
       ty' <- inferType v
       checkEq s ty'
-      substInto x ty' ty
+      substInto x v ty
 
 inferUniverse :: Monad m => Exp -> TcM m Int
 inferUniverse exp = do
